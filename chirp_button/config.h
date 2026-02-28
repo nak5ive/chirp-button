@@ -28,3 +28,11 @@
 #define BOND_CLEAR_HOLD_MS          5000UL
 #define BOND_CLEAR_FLASH_MS         3000UL
 #define BOND_CLEAR_FLASH_PERIOD_MS  100UL
+
+// ── Power management (milliseconds) ──────────────────────────────────────────
+// USB-C VBUS detection uses NRF_POWER->USBREGSTATUS — no TinyUSB required.
+// Sleep and LED idle only apply when USB is absent (battery-only operation).
+#define ADV_SLEEP_TIMEOUT_MS     300000UL   // 5 min   — battery-only: advertising with no connection before sleep
+#define SLEEP_TIMEOUT_MS        3600000UL   // 1 hour  — battery-only idle in CONNECTED_IDLE before System OFF (deep sleep)
+#define LED_IDLE_TIMEOUT_MS      300000UL   // 5 min   — battery-only idle in CONNECTED_IDLE before LED fade-out
+#define LED_FADE_DURATION_MS       2000UL   // 2 s     — duration of LED fade-out animation

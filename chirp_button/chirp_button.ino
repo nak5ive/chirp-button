@@ -39,6 +39,12 @@ static uint32_t bondTimerStart  = 0;
 // ── Breathe phase anchor (§5.3) ───────────────────────────────────────────────
 static uint32_t breatheStartTime = 0;
 
+// ── Power management state (§5.8) ─────────────────────────────────────────────
+static uint32_t lastActivityTime = 0;    // millis() of last button edge or BLE event
+static bool     idleLedOff       = false; // true after LED_IDLE_TIMEOUT_MS fires
+static bool     idleLedFading    = false; // true during the LED_FADE_DURATION_MS fade
+static uint32_t fadeStartTime    = 0;
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BLE callbacks
@@ -46,13 +52,15 @@ static uint32_t breatheStartTime = 0;
 
 void connectCallback(uint16_t conn_handle) {
     (void)conn_handle;
-    bleConnected = true;
+    bleConnected     = true;
+    lastActivityTime = millis();
 }
 
 void disconnectCallback(uint16_t conn_handle, uint8_t reason) {
     (void)conn_handle;
     (void)reason;
-    bleConnected = false;
+    bleConnected     = false;
+    lastActivityTime = millis();
 }
 
 
@@ -87,6 +95,22 @@ static void showBreathe(uint32_t color) {
     uint8_t b = (uint8_t)(( color        & 0xFF) * scale);
 
     pixel.setPixelColor(0, r, g, b);
+    pixel.show();
+}
+
+// Breathe effect with an additional linear scale (0.0–1.0) applied on top —
+// used for the LED fade-out animation (§5.8).
+static void showBreatheScaled(uint32_t color, float extraScale) {
+    uint32_t elapsed = millis() - breatheStartTime;
+    float t          = (float)(elapsed % BREATHE_PERIOD_MS) / (float)BREATHE_PERIOD_MS;
+    float sine       = (sinf(t * TWO_PI - HALF_PI) + 1.0f) / 2.0f;
+    float brightness = (BREATHE_MIN + sine * (BREATHE_MAX - BREATHE_MIN)) * extraScale;
+    float scale      = brightness / 255.0f;
+
+    pixel.setPixelColor(0,
+        (uint8_t)(((color >> 16) & 0xFF) * scale),
+        (uint8_t)(((color >>  8) & 0xFF) * scale),
+        (uint8_t)(( color        & 0xFF) * scale));
     pixel.show();
 }
 
@@ -136,6 +160,31 @@ static void runBondClear() {
     showOff();
     Bluefruit.Periph.clearBonds();
     NVIC_SystemReset();
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Power management helpers (§5.8)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Returns true when a USB host or charger is supplying VBUS.
+// Reads the nRF52840 power-management register directly — no TinyUSB required.
+static bool isUsbConnected() {
+    return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+}
+
+// Enter nRF52840 System OFF (deepest sleep, < 2 µA).
+// PTT_PIN is configured as the SENSE_LOW wakeup source.
+// sd_power_system_off() does not return; the next button press causes a full
+// reset and setup() reruns → BLE advertising resumes.
+static void enterDeepSleep() {
+    showOff();
+    nrf_gpio_cfg_sense_input(
+        g_ADigitalPinMap[PTT_PIN],
+        NRF_GPIO_PIN_PULLUP,
+        NRF_GPIO_PIN_SENSE_LOW);
+    sd_power_system_off();
+    while (true) { }  // unreachable; silences compiler warning
 }
 
 
@@ -194,7 +243,8 @@ void setup() {
     // Start advertising → ADVERTISING state
     startAdv();
     resetBreathePhase();
-    state = STATE_ADVERTISING;
+    state            = STATE_ADVERTISING;
+    lastActivityTime = millis();
 }
 
 
@@ -204,6 +254,13 @@ void setup() {
 
 void loop() {
     updateButton();
+
+    // ── Activity tracking (§5.8) ───────────────────────────────────────────────
+    if (buttonJustPressed() || buttonJustReleased()) {
+        lastActivityTime = millis();
+        idleLedOff    = false;
+        idleLedFading = false;
+    }
 
     // ── BLE-driven state transitions ──────────────────────────────────────────
 
@@ -226,6 +283,9 @@ void loop() {
 
         // ── ADVERTISING: breathe blue, watch for bond-clear hold (§5.6) ───────
         case STATE_ADVERTISING:
+            if (!isUsbConnected() && (millis() - lastActivityTime >= ADV_SLEEP_TIMEOUT_MS)) {
+                enterDeepSleep();
+            }
             showBreathe(COLOR_ADV);
 
             if (buttonJustPressed()) {
@@ -240,9 +300,39 @@ void loop() {
             }
             break;
 
-        // ── CONNECTED_IDLE: breathe green, watch for button press ─────────────
+        // ── CONNECTED_IDLE: breathe green, LED idle timeout, sleep (§5.6, §5.8)
         case STATE_CONNECTED_IDLE:
-            showBreathe(COLOR_IDLE);
+            if (!isUsbConnected() && (millis() - lastActivityTime >= SLEEP_TIMEOUT_MS)) {
+                enterDeepSleep();
+            }
+
+            if (!isUsbConnected()) {
+                uint32_t idleMs = millis() - lastActivityTime;
+
+                if (!idleLedOff && !idleLedFading && idleMs >= LED_IDLE_TIMEOUT_MS) {
+                    idleLedFading = true;
+                    fadeStartTime = millis();
+                }
+
+                if (idleLedFading) {
+                    uint32_t elapsed = millis() - fadeStartTime;
+                    if (elapsed >= LED_FADE_DURATION_MS) {
+                        idleLedFading = false;
+                        idleLedOff    = true;
+                        showOff();
+                    } else {
+                        float scale = 1.0f - (float)elapsed / (float)LED_FADE_DURATION_MS;
+                        showBreatheScaled(COLOR_IDLE, scale);
+                    }
+                } else if (idleLedOff) {
+                    showOff();
+                } else {
+                    showBreathe(COLOR_IDLE);
+                }
+            } else {
+                // USB connected — always breathe, never sleep
+                showBreathe(COLOR_IDLE);
+            }
 
             if (buttonJustPressed()) {
                 state = STATE_CONNECTED_ACTIVE;

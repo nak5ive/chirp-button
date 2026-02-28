@@ -64,6 +64,10 @@ All user-tunable values live in a dedicated `config.h` header so they can be cha
 | `BOND_CLEAR_HOLD_MS` | `5000` | Duration button must be held in `ADVERTISING` state to trigger bond clear |
 | `BOND_CLEAR_FLASH_MS` | `3000` | Duration of the purple flash confirmation sequence before reset |
 | `BOND_CLEAR_FLASH_PERIOD_MS` | `100` | On+off period of rapid purple flash (10 Hz) |
+| `ADV_SLEEP_TIMEOUT_MS` | `300000` (5 min) | Battery-only: time spent in `ADVERTISING` with no connection before entering deep sleep; disabled when USB is connected |
+| `SLEEP_TIMEOUT_MS` | `3600000` (1 hour) | Battery-only idle duration in `CONNECTED_IDLE` before entering deep sleep (System OFF); disabled when USB is connected |
+| `LED_IDLE_TIMEOUT_MS` | `300000` (5 min) | Battery-only idle duration in `CONNECTED_IDLE` before LED fade-out begins; disabled when USB is connected |
+| `LED_FADE_DURATION_MS` | `2000` (2 s) | Duration of the LED fade-out animation in `CONNECTED_IDLE` before the LED is fully off |
 
 ---
 
@@ -81,7 +85,7 @@ The firmware operates as a four-state machine driven by BLE connection status an
          │                               │  ▲
          │ button held                   │  │ button
          │ BOND_CLEAR_HOLD_MS   pressed  │  │ released
-         │ (see §5.7)                    ▼  │
+         │ (see §5.6)                    ▼  │
          ▼                         ┌──────────────┐
   ┌──────────────┐                 │ CONNECTED    │
   │    BOND      │                 │   ACTIVE     │
@@ -90,14 +94,24 @@ The firmware operates as a four-state machine driven by BLE connection status an
          │ after BOND_CLEAR_FLASH_MS
          ▼
   [erase bonds → software reset]
+
+  (battery only)
+  ADVERTISING ──── no connection for ADV_SLEEP_TIMEOUT_MS (5 min) ──► ┌─────────────┐
+  CONNECTED_IDLE ─── no button press for SLEEP_TIMEOUT_MS (1 hr) ───► │ DEEP_SLEEP  │
+                                                                        │ (System OFF)│
+                                                                        └─────────────┘
+                                                                               │ button press
+                                                                               ▼ (full reset → setup())
+                                                                        [ADVERTISING]
 ```
 
 | State | NeoPixel | BLE HID output |
 |---|---|---|
 | `ADVERTISING` | `COLOR_ADV` breathing (§5.3) | None |
-| `CONNECTED_IDLE` | `COLOR_IDLE` breathing (§5.3) | No key held |
+| `CONNECTED_IDLE` | `COLOR_IDLE` breathing (§5.3); fades out and turns off after `LED_IDLE_TIMEOUT_MS` on battery (§5.8) | No key held |
 | `CONNECTED_ACTIVE` | `COLOR_ACTIVE` solid | `HID_MODIFIER` held |
 | `BOND_CLEARING` | `COLOR_CLEAR` rapid flash (§5.6) | None |
+| `DEEP_SLEEP` | Off | None — device in System OFF (< 2 µA) |
 
 ### 5.2 State Transitions
 
@@ -114,6 +128,11 @@ The firmware operates as a four-state machine driven by BLE connection status an
   - Send no further HID reports (connection is gone).
   - Transition to `ADVERTISING` state immediately.
 - **BOND_CLEARING → [reset]**: after `BOND_CLEAR_FLASH_MS` elapses, erase bond data and perform a software reset. Device reboots into `ADVERTISING` with no bond stored.
+- **ADVERTISING → DEEP_SLEEP**: USB absent and no BLE connection established within `ADV_SLEEP_TIMEOUT_MS` (5 min) since last activity (typically since advertising began). Device enters nRF52840 System OFF (see §5.8).
+- **CONNECTED_IDLE → DEEP_SLEEP**: USB absent and no button activity for `SLEEP_TIMEOUT_MS` (1 hour). Device enters System OFF (see §5.8).
+- **DEEP_SLEEP → ADVERTISING**: button press exits System OFF via a full hardware reset. `setup()` reruns and advertising begins; any bonded host reconnects automatically.
+
+**LED idle timeout (battery-only, `CONNECTED_IDLE` only):** After `LED_IDLE_TIMEOUT_MS` of inactivity on battery, the green breathe LED fades out over `LED_FADE_DURATION_MS` and turns off. The BLE connection is maintained; the LED resumes breathing immediately on the next button press.
 
 Button presses in `ADVERTISING` are tracked only for the bond-clear hold timer (§5.6). No HID reports are sent.
 
@@ -178,6 +197,54 @@ Software debounce is applied to both press and release edges:
 - Only accept the new state if it has been stable for `DEBOUNCE_MS` milliseconds.
 - Do not send HID events for transitions that fail the debounce check.
 
+### 5.8 Power Management
+
+#### USB detection
+
+The firmware detects VBUS (USB-C power) by reading the nRF52840 power-management register directly:
+
+```cpp
+bool usbPresent = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+```
+
+No TinyUSB or USB data stack is required. VBUS is present whenever a charger or host supplies 5 V on the USB-C connector, regardless of whether a data connection is established.
+
+#### Idle tracking
+
+`lastActivityTime` is updated on every:
+- Debounced button press
+- Debounced button release
+- BLE connect event
+- BLE disconnect event
+
+#### Behaviour when USB is connected
+
+All sleep and LED idle timeout logic is disabled. The device breathes normally in all states indefinitely.
+
+#### Behaviour on battery only
+
+**5-minute advertising timeout → deep sleep (`ADV_SLEEP_TIMEOUT_MS`)**
+
+Checked in `ADVERTISING` each main-loop tick. If USB is absent and `millis() - lastActivityTime ≥ ADV_SLEEP_TIMEOUT_MS` (5 min) with no connection established, enter deep sleep (steps below). `lastActivityTime` is reset when advertising starts (via disconnect callback or `setup()`), so the timer measures time spent advertising without a connection.
+
+**1-hour connected idle → deep sleep (`SLEEP_TIMEOUT_MS`)**
+
+Checked in `CONNECTED_IDLE` each main-loop tick. If USB is absent and `millis() - lastActivityTime ≥ SLEEP_TIMEOUT_MS` (1 hour) with no button activity:
+
+1. Turn NeoPixel off.
+2. Configure `PTT_PIN` as SENSE_LOW GPIO wakeup source (with pull-up).
+3. Call `sd_power_system_off()` (SoftDevice-safe System OFF entry; < 2 µA quiescent).
+4. Device wakes on button press via a full nRF52840 reset → `setup()` reruns → advertising begins.
+
+**5-minute idle → LED fade-out (`LED_IDLE_TIMEOUT_MS`)**
+
+Checked in `CONNECTED_IDLE` only. If USB is absent and `millis() - lastActivityTime ≥ LED_IDLE_TIMEOUT_MS`:
+
+1. Begin a linear fade-out of the green breathe LED over `LED_FADE_DURATION_MS` (2 s) using `showBreatheScaled()`.
+2. After the fade completes, call `showOff()` and mark `idleLedOff = true`.
+3. BLE connection is unaffected; the device remains in `CONNECTED_IDLE`.
+4. On the next button press, `idleLedOff` and `idleLedFading` are cleared and the green breathe resumes immediately.
+
 ---
 
 ## 6. BLE Profile
@@ -198,8 +265,9 @@ No mouse, consumer, or gamepad HID endpoints are needed.
 ## 7. Power and Charging
 
 - The 650 mAh LiPo is charged automatically by the XIAO nRF52840's onboard charger whenever USB-C is connected.
-- Firmware does not manage charging, monitor battery voltage, or alter behaviour based on charge state in v1.
+- Firmware does not manage charging or monitor battery voltage.
 - The device operates normally while charging.
+- Firmware detects USB-C VBUS via `NRF_POWER->USBREGSTATUS` and uses this to disable sleep and LED idle timeouts while USB is connected (see §5.8).
 
 ---
 
@@ -210,7 +278,8 @@ No mouse, consumer, or gamepad HID endpoints are needed.
 - [x] **Step 3 — Button init**: Configure `PTT_PIN` as `INPUT_PULLUP`.
 - [x] **Step 4 — BLE HID init**: Configure `Bluefruit`, `BLEHidAdafruit`, and `BLEDis` (device info service). Set device name and appearance. Begin advertising.
 - [x] **Step 5 — Main loop**: Read `PTT_PIN` with debounce (§5.7), implement state machine (§5.1–5.2), drive NeoPixel breathe effect (§5.3) during `ADVERTISING` and `CONNECTED_IDLE`, implement bond-clear hold timer and `BOND_CLEARING` flash sequence (§5.6).
-- [ ] **Step 6 — Validate**: Pair with host OS, confirm key events arrive in OS key viewer, confirm NeoPixel transitions match spec, confirm button ignored when disconnected, confirm bond-clear gesture erases bond and reboots into general advertising.
+- [x] **Step 6 — Power management**: Implement USB VBUS detection, deep sleep (System OFF) after 1-hour battery idle, 5-minute LED fade-out in `CONNECTED_IDLE` on battery, and 5-minute advertising timeout (§5.8).
+- [ ] **Step 7 — Validate**: Pair with host OS, confirm key events arrive in OS key viewer, confirm NeoPixel transitions match spec, confirm button ignored when disconnected, confirm bond-clear gesture erases bond and reboots into general advertising. Validate all power management scenarios from §5.8 verification checklist.
 
 ---
 
