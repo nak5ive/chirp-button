@@ -134,7 +134,7 @@ static void runBondClear() {
     }
 
     showOff();
-    Bluefruit.clearBonds();
+    Bluefruit.Periph.clearBonds();
     NVIC_SystemReset();
 }
 
@@ -246,7 +246,8 @@ void loop() {
 
             if (buttonJustPressed()) {
                 state = STATE_CONNECTED_ACTIVE;
-                blehid.keyPress(0, HID_KEY);
+                uint8_t keys[6] = { 0, 0, 0, 0, 0, 0 };
+                blehid.keyboardReport(HID_MODIFIER, keys);
                 showColor(COLOR_ACTIVE);
             }
             break;

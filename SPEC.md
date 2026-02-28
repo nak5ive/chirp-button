@@ -50,7 +50,7 @@ All user-tunable values live in a dedicated `config.h` header so they can be cha
 | `NEO_PIN` | `A3` | NeoPixel data pin |
 | `NEO_COUNT` | `1` | Number of NeoPixels |
 | `NEO_BRIGHTNESS` | `80` | Global brightness (0–255) |
-| `HID_KEY` | `HID_KEY_F13` | BLE HID key code sent while button is held |
+| `HID_MODIFIER` | `0x40` (Right Option) | HID modifier byte sent while button is held; keycode array is all zeros |
 | `BLE_DEVICE_NAME` | `"Chirp Button"` | BLE advertised device name |
 | `COLOR_ADV` | `0x00, 0x00, 0xFF` (blue) | Hue used while advertising (breathing) |
 | `COLOR_IDLE` | `0x00, 0xFF, 0x00` (green) | Hue used while connected idle (breathing) |
@@ -96,7 +96,7 @@ The firmware operates as a four-state machine driven by BLE connection status an
 |---|---|---|
 | `ADVERTISING` | `COLOR_ADV` breathing (§5.3) | None |
 | `CONNECTED_IDLE` | `COLOR_IDLE` breathing (§5.3) | No key held |
-| `CONNECTED_ACTIVE` | `COLOR_ACTIVE` solid | `HID_KEY` held |
+| `CONNECTED_ACTIVE` | `COLOR_ACTIVE` solid | `HID_MODIFIER` held |
 | `BOND_CLEARING` | `COLOR_CLEAR` rapid flash (§5.6) | None |
 
 ### 5.2 State Transitions
@@ -105,7 +105,7 @@ The firmware operates as a four-state machine driven by BLE connection status an
 - **ADVERTISING → CONNECTED_IDLE**: bonded host connects and HID service is ready.
 - **ADVERTISING → BOND_CLEARING**: button held continuously for `BOND_CLEAR_HOLD_MS` (see §5.6).
 - **CONNECTED_IDLE → CONNECTED_ACTIVE**: debounced LOW edge on `PTT_PIN`
-  - Send BLE HID key-down report for `HID_KEY`.
+  - Send BLE HID report with modifier byte `HID_MODIFIER` and all-zero keycodes (Right Option held).
   - Set NeoPixel to `COLOR_ACTIVE`.
 - **CONNECTED_ACTIVE → CONNECTED_IDLE**: debounced HIGH edge on `PTT_PIN`
   - Send BLE HID key-up report (empty report).

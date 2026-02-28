@@ -10,8 +10,8 @@
 #define BLE_DEVICE_NAME     "Chirp Button"
 
 // ── HID keycode ───────────────────────────────────────────────────────────────
-// F13 = 0x68 per USB HID Usage Tables §10 (Keyboard/Keypad Page)
-#define HID_KEY             0x68
+// Right Option = bit 6 of the HID modifier byte (USB HID Usage Tables §10)
+#define HID_MODIFIER        0x40
 
 // ── Colours — packed 0x00RRGGBB (Adafruit_NeoPixel format) ───────────────────
 #define COLOR_ADV           0x000000FFul  // blue   — advertising breathe hue
